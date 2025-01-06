@@ -3,8 +3,8 @@ import WebKit
 
 // Put your mDNS, IP address, or web URL here.
 // (Note: You can use a local web server with a self-signed cert, and https as the protocol, to (eg) get more accuracy from performance.now())
-//let url = URL(string: "https://alexwarth.github.io/projects/sutherland/")!
-let url = URL(string: "http://awarth.local:5173")!
+let url = URL(string: "https://alexwarth.github.io/projects/sutherland/")!
+//let url = URL(string: "http://awarth.local:5173")!
 
 @main
 struct WrapperApp: App {
