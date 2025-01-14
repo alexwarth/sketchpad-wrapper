@@ -56,53 +56,101 @@ struct AppView: View {
 // This struct wraps WKWebView so that we can use it in SwiftUI.
 // Hopefully it won't be long before this can all be removed.
 struct WrapperWebView: UIViewRepresentable {
-    let webView = WKWebView()
     @Binding var error: Error?
     @Binding var loading: Bool
     
+    // This coordinator is created first, right at the beginning of setting up our view.
+    // A "coordinator" is a delegate that handles a bunch of UIKit events and other stuff on behalf of the WKWebView instance.
+    // This delegate pattern is just how UIKit classes are made extensible.
+    // We give it a reference to this struct so that it can communicate with SwiftUI (eg: by changing the $error and $loading bindings).
+    func makeCoordinator() -> WebViewCoordinator { WebViewCoordinator(self) }
+    
+    // Next, we need to initialize the UIKit view that'll be added to SwiftUI (a WKWebView, in our case).
     func makeUIView(context: Context) -> WKWebView {
-        webView.isInspectable = true
-        webView.navigationDelegate = context.coordinator
-        webView.addGestureRecognizer(TouchesToJS(webView))
-        loadRequest(webView: webView, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData)
+        // It's idiomatic that the coordinator do all the fanciness on behalf of the UIKit, and this UIViewRepresentable struct just manage lifecycle.
+        // So, for conveinence, we have the coordinator create the webView instance and do a bunch of configuration before giving it back to us.
+        let webView = context.coordinator.setupWebView();
+
+        // Never use the cache
+        webView.load(URLRequest(url: url, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData))
+        
         return webView
-    }
-    
-    private func loadRequest(webView: WKWebView, cachePolicy: URLRequest.CachePolicy) {
-        webView.load(URLRequest(url: url, cachePolicy: cachePolicy))
-    }
-    
-    func orient(_ orientation:Int) {
-        webView.evaluateJavaScript("if ('orient' in window) orient(\(orientation))", completionHandler: nil)
     }
     
     // Required by UIViewRepresentable
     func updateUIView(_ uiView: WKWebView, context: Context) {}
+}
+
+class WebViewCoordinator: NSObject, WKNavigationDelegate, WKScriptMessageHandler {
+    let parent: WrapperWebView
+    var webView: WKWebView?
+    var feedback: UICanvasFeedbackGenerator? // for haptic feedback
+    var touchRecognizer: TouchesToJS?
+    var triedOffline = false
+
+    init(_ webView: WrapperWebView) { self.parent = webView }
     
-    // To make use of various WKWebView delegates, we need a real class
-    func makeCoordinator() -> WebViewCoordinator { WebViewCoordinator(self) }
-    class WebViewCoordinator: NSObject, WKNavigationDelegate {
-        let parent: WrapperWebView
-        var triedOffline = false
-        init(_ webView: WrapperWebView) { self.parent = webView }
-        func webView(_ wv: WKWebView, didFinish nav: WKNavigation) { parent.loading = false; }
-        func webView(_ wv: WKWebView, didFail nav: WKNavigation, withError error: Error) { parent.error = error }
-        func webView(_ wv: WKWebView, didFailProvisionalNavigation nav: WKNavigation, withError error: Error) {
-            if !triedOffline {
-                // The first time provisional navigation fails, try loading from the browser cache.
-                // This is useful if you're loading an app from a web server and want that to work even when the iPad is offline.
-                triedOffline = true
-                parent.loadRequest(webView: wv, cachePolicy: .returnCacheDataDontLoad)
-            } else {
-                parent.error = error
-            }
+    func setupWebView() -> WKWebView {
+        // Content controller for sending messages from JS to the Wrapper
+        let contentController = WKUserContentController()
+        messageNames.forEach { contentController.add(self, name: $0) }
+        
+        // Content controllers must be added to a Configuration instance.
+        let config = WKWebViewConfiguration()
+        config.userContentController = contentController
+        
+        // Initialize our WKWebView instance, into which we'll load the JS app from the user-selected server
+        let webView = WKWebView(frame: .zero, configuration: config)
+        webView.isInspectable = true
+        
+        // The coordinator is the view's delegate, handling various events associated with the view (because that's idiomatic).
+        webView.navigationDelegate = self
+        
+        self.webView = webView
+
+        // For haptic feedback
+        self.feedback = UICanvasFeedbackGenerator(view: webView)
+
+        // For forwarding touch data to the webapp
+        self.touchRecognizer = TouchesToJS(webView)
+        webView.addGestureRecognizer(touchRecognizer!)
+        
+        return webView
+    }
+
+    // This will travel all the way up to SwiftUI and unhide the webview.
+    func webView(_ wv: WKWebView, didFinish nav: WKNavigation) { parent.loading = false; }
+
+    // If loading fails, return to the Select A Server view and show an error message
+    func webView(_ wv: WKWebView, didFail nav: WKNavigation, withError error: Error) { parent.error = error }
+    func webView(_ wv: WKWebView, didFailProvisionalNavigation nav: WKNavigation, withError error: Error) { parent.error = error }
+
+    // This makes the webview ignore certificate errors, so you can use a self-signed cert for https, so that the browser context is trusted, which enables additional APIs
+    func webView(_ wv: WKWebView, respondTo challenge: URLAuthenticationChallenge) async -> (URLSession.AuthChallengeDisposition, URLCredential?) {
+        (.useCredential, URLCredential(trust: challenge.protectionSpace.serverTrust!))
+    }
+    
+    // These are all the messages we handle, listed here so we can add handlers for them in a loop
+    let messageNames = [
+        "prepareHaptics",
+        "hapticImpact",
+    ]
+    
+    // This allows the Sketchpad webapp to send messages to the Wrapper.
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage) {
+        print(message.name)
+        
+        if let feedback, message.name == "prepareHaptics" {
+            feedback.prepare()
         }
-        // This makes the webview ignore certificate errors, so you can use a self-signed cert for https, so that the browser context is trusted, which enables additional APIs
-        func webView(_ wv: WKWebView, respondTo challenge: URLAuthenticationChallenge) async -> (URLSession.AuthChallengeDisposition, URLCredential?) {
-            (.useCredential, URLCredential(trust: challenge.protectionSpace.serverTrust!))
+        
+        if let feedback, message.name == "hapticImpact" {
+            print("wham!")
+            feedback.pathCompleted(at: .zero)
         }
     }
 }
+
 
 // This class captures all the touch events triggered on a given WKWebView, and re-triggeres them inside the JS context.
 // This allows JS to receive pencil and touch simultaneously.
